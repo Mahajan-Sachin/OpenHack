@@ -160,6 +160,12 @@ class ValidatorSwarmAgent:
                 r for r in run_results if r.get("validated_findings")
             ]
             confirmed_count = len(confirmed_runs)
+            rejection_runs = [
+                r for r in run_results if r.get("false_positives")
+            ]
+            failed_runs = [
+                r for r in run_results if r.get("type") == "validation_failed"
+            ]
 
             # Strict majority required (>= threshold). Ties are NOT confirmed.
             if confirmed_count >= threshold and confirmed_runs:
@@ -181,15 +187,18 @@ class ValidatorSwarmAgent:
                         "threshold": threshold,
                     },
                 )
-            elif all(r.get("type") == "validation_failed" for r in run_results) or not run_results:
-                # All votes failed due to API, execution, or runtime errors.
-                # A failed review provides no evidence that the finding is safe.
-                # Record failed or unfinished review separately from an actual rejection.
+            elif (len(failed_runs) > 0 and len(rejection_runs) < threshold) or not run_results:
+                # Review is unfinished or inconclusive because one or more votes failed execution
+                # (API error, prompt error, or timeout) without achieving a definitive rejection.
+                # Record unfinished/failed review separately from an actual rejection.
                 unreviewed_entry = {
                     "original_index": finding_idx,
                     "status": "unreviewed",
                     "confidence": "none",
-                    "evidence": f"Validation review failed to complete across all {votes} attempts (execution or API error).",
+                    "evidence": (
+                        f"Validation review was unfinished or inconclusive ({confirmed_count} confirmed, "
+                        f"{len(rejection_runs)} rejected, {len(failed_runs)} failed with execution errors across {votes} attempts)."
+                    ),
                 }
                 all_unreviewed.append(unreviewed_entry)
                 self.session.add_trace(
@@ -198,7 +207,9 @@ class ValidatorSwarmAgent:
                     content={
                         "finding_index": finding_idx,
                         "status": "unreviewed",
-                        "confirmed_votes": 0,
+                        "confirmed_votes": confirmed_count,
+                        "rejected_votes": len(rejection_runs),
+                        "failed_votes": len(failed_runs),
                         "total_votes": votes,
                         "threshold": threshold,
                         "review_failed": True,

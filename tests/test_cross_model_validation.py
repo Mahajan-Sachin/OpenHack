@@ -264,7 +264,38 @@ class TestValidatorSwarmConsensus:
             entry = res["unreviewed"][0]
             assert entry["status"] == "unreviewed"
             assert entry["confidence"] == "none"
-            assert "failed to complete" in entry["evidence"]
+            assert "failed with execution errors" in entry["evidence"]
+
+    @pytest.mark.asyncio
+    async def test_unfinished_review_with_partial_failures_recorded_as_unreviewed_not_rejection(self, mock_llm, mock_tools, mock_session):
+        # 3 votes requested: 1 confirmed, 2 failed execution errors -> cannot reach majority, but not rejected
+        with patch.object(settings, "validator_votes", 3):
+            swarm = ValidatorSwarmAgent(mock_llm, mock_tools, mock_session)
+            context = {"hunter": {"findings": [{"file_path": "app.py", "category": "sqli", "description": "query"}]}}
+
+            run_count = 0
+            async def mock_run(task, ctx):
+                nonlocal run_count
+                run_count += 1
+                if run_count == 1:
+                    return {
+                        "validated_findings": [{"original_index": 0, "status": "confirmed", "evidence": "good"}],
+                        "false_positives": [],
+                        "type": "validation_complete",
+                    }
+                return {"validated_findings": [], "false_positives": [], "type": "validation_failed"}
+
+            with patch("openhack.agents.validator_swarm.ValidatorAgent.run", side_effect=mock_run):
+                res = await swarm.run("validate", context=context)
+
+            # Must not be confirmed (only 1 of 2 needed votes)
+            assert len(res["validated_findings"]) == 0
+            # Must NOT look like a rejection/false positive!
+            assert len(res["false_positives"]) == 0
+            # Must be recorded separately as unreviewed/unfinished
+            assert len(res["unreviewed"]) == 1
+            assert res["unreviewed"][0]["status"] == "unreviewed"
+            assert "unfinished or inconclusive" in res["unreviewed"][0]["evidence"]
 
 
 class TestHardenedValidatorPromptChecks:
