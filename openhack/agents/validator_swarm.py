@@ -36,12 +36,18 @@ class ValidatorSwarmAgent:
         self.total_output_tokens: int = 0
 
     def _get_models(self) -> tuple[str, str]:
-        hunter_model = (
-            self.hunter_model
-            or getattr(settings, "hunter_model_id", None)
-            or self.llm.model
-        )
-        validator_model = settings.validator_model_id or self.llm.model
+        if self.hunter_model is not None:
+            # Caller explicitly passed hunter_model and pre-resolved validator client
+            hunter_model = self.hunter_model
+            validator_model = settings.validator_model_id or self.llm.model
+        else:
+            # Caller passed a generic client without pre-resolving; automatically select cross-model
+            hunter_model = getattr(settings, "hunter_model_id", None) or self.llm.model
+            validator_model = resolve_validator_model(
+                hunter_model=hunter_model,
+                requested_validator_model=settings.validator_model_id,
+                provider=self.llm.provider,
+            )
         return hunter_model, validator_model
 
     def _create_llm_for_sub_validator(self) -> LLMClient:

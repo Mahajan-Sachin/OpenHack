@@ -155,7 +155,8 @@ async def run(target_dir: str, resume_session_id: str = None):
         "hunter": {"findings": feature_findings},
         "recon": recon_result,
     }
-    validator_swarm = ValidatorSwarmAgent(validator_llm, tools, session)
+    feature_hunter_model = getattr(settings, "feature_hunter_model_id", None) or getattr(settings, "hunter_model_id", None) or validator_llm.model
+    validator_swarm = ValidatorSwarmAgent(validator_llm, tools, session, hunter_model=feature_hunter_model)
     validator_result = await validator_swarm.run(
         "Validate each potential vulnerability.", context=validator_context,
     )

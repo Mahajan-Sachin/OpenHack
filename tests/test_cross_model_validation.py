@@ -120,6 +120,20 @@ class TestValidatorSwarmConsensus:
             # Validator must use kimi-k2.5 and NOT invert back to gpt-5.6-sol
             assert sub_llm.model == "kimi-k2.5"
 
+    def test_swarm_sub_validator_model_automatic_when_hunter_model_unset(self, mock_tools, mock_session):
+        # Caller passes a default LLMClient without hunter_model (e.g. scripts/run_feature_hunt.py)
+        default_llm = MagicMock()
+        default_llm.model = "gpt-5.6-sol"
+        default_llm.provider = "openhack"
+        default_llm.prompt_cache_key = None
+
+        with patch.object(settings, "validator_model_id", None), \
+             patch.object(settings, "hunter_model_id", None):
+            swarm = ValidatorSwarmAgent(default_llm, mock_tools, mock_session, hunter_model=None)
+            sub_llm = swarm._create_llm_for_sub_validator()
+            # Must automatically select cross-model (kimi-k2.5) rather than self-validating with gpt-5.6-sol
+            assert sub_llm.model == "kimi-k2.5"
+
     @pytest.mark.asyncio
     async def test_strict_majority_2_of_3_confirms_finding(self, mock_llm, mock_tools, mock_session):
         # 3 votes: 2 confirmed, 1 false positive -> should be confirmed
