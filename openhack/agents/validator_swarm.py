@@ -36,16 +36,18 @@ class ValidatorSwarmAgent:
         self.total_output_tokens: int = 0
 
     def _get_models(self) -> tuple[str, str]:
-        if self.hunter_model is not None:
-            # Caller explicitly passed hunter_model and pre-resolved validator client
-            hunter_model = self.hunter_model
-            validator_model = settings.validator_model_id or self.llm.model
+        hunter_model = self.hunter_model or getattr(settings, "hunter_model_id", None) or self.llm.model
+        if settings.validator_model_id:
+            validator_model = settings.validator_model_id
+        elif self.llm.model and self.llm.model != hunter_model:
+            # Caller passed an already-resolved validator client distinct from the hunter model
+            validator_model = self.llm.model
         else:
-            # Caller passed a generic client without pre-resolving; automatically select cross-model
-            hunter_model = getattr(settings, "hunter_model_id", None) or self.llm.model
+            # Caller passed a generic/default client without resolving an independent validator model;
+            # preserve automatic cross-model selection so hunter does not review its own findings
             validator_model = resolve_validator_model(
                 hunter_model=hunter_model,
-                requested_validator_model=settings.validator_model_id,
+                requested_validator_model=None,
                 provider=self.llm.provider,
             )
         return hunter_model, validator_model
@@ -76,6 +78,7 @@ class ValidatorSwarmAgent:
                 "raw_output": "No findings to validate",
                 "validated_findings": [],
                 "false_positives": [],
+                "unreviewed": [],
                 "type": "validation_complete",
             }
 
@@ -149,6 +152,7 @@ class ValidatorSwarmAgent:
 
         all_validated: list[dict] = []
         all_false_positives: list[dict] = []
+        all_unreviewed: list[dict] = []
         threshold = (votes // 2) + 1
 
         for finding_idx, run_results in results_by_finding.items():
@@ -177,28 +181,42 @@ class ValidatorSwarmAgent:
                         "threshold": threshold,
                     },
                 )
+            elif all(r.get("type") == "validation_failed" for r in run_results) or not run_results:
+                # All votes failed due to API, execution, or runtime errors.
+                # A failed review provides no evidence that the finding is safe.
+                # Record failed or unfinished review separately from an actual rejection.
+                unreviewed_entry = {
+                    "original_index": finding_idx,
+                    "status": "unreviewed",
+                    "confidence": "none",
+                    "evidence": f"Validation review failed to complete across all {votes} attempts (execution or API error).",
+                }
+                all_unreviewed.append(unreviewed_entry)
+                self.session.add_trace(
+                    agent=self.name,
+                    event_type="validation_consensus",
+                    content={
+                        "finding_index": finding_idx,
+                        "status": "unreviewed",
+                        "confirmed_votes": 0,
+                        "total_votes": votes,
+                        "threshold": threshold,
+                        "review_failed": True,
+                    },
+                )
             else:
                 fp_entry = None
                 for r in run_results:
                     if r.get("false_positives"):
                         fp_entry = r["false_positives"][0]
                         break
-                all_failed = all(r.get("type") == "validation_failed" for r in run_results)
                 if not fp_entry:
-                    if all_failed:
-                        fp_entry = {
-                            "original_index": finding_idx,
-                            "status": "needs_more_info",
-                            "confidence": "low",
-                            "evidence": f"Validation review failed to complete across all {votes} attempts (execution error).",
-                        }
-                    else:
-                        fp_entry = {
-                            "original_index": finding_idx,
-                            "status": "false_positive",
-                            "confidence": "medium",
-                            "evidence": f"Failed strict majority validation ({confirmed_count}/{votes} confirmed votes, required >={threshold})",
-                        }
+                    fp_entry = {
+                        "original_index": finding_idx,
+                        "status": "false_positive",
+                        "confidence": "medium",
+                        "evidence": f"Failed strict majority validation ({confirmed_count}/{votes} confirmed votes, required >={threshold})",
+                    }
                 all_false_positives.append(fp_entry)
                 self.session.add_trace(
                     agent=self.name,
@@ -209,7 +227,7 @@ class ValidatorSwarmAgent:
                         "confirmed_votes": confirmed_count,
                         "total_votes": votes,
                         "threshold": threshold,
-                        "review_failed": all_failed,
+                        "review_failed": False,
                     },
                 )
 
@@ -225,6 +243,7 @@ class ValidatorSwarmAgent:
             content={
                 "total_confirmed": len(all_validated),
                 "total_false_positives": len(all_false_positives),
+                "total_unreviewed": len(all_unreviewed),
                 "total_cost": self.total_cost,
                 "total_tokens": self.total_tokens,
                 "validator_votes": votes,
@@ -232,8 +251,9 @@ class ValidatorSwarmAgent:
         )
 
         return {
-            "raw_output": f"Validated {len(findings)} findings: {len(all_validated)} confirmed, {len(all_false_positives)} false positives",
+            "raw_output": f"Validated {len(findings)} findings: {len(all_validated)} confirmed, {len(all_false_positives)} false positives, {len(all_unreviewed)} unreviewed",
             "validated_findings": all_validated,
             "false_positives": all_false_positives,
+            "unreviewed": all_unreviewed,
             "type": "validation_complete",
         }

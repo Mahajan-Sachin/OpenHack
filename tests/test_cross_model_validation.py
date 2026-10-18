@@ -134,6 +134,20 @@ class TestValidatorSwarmConsensus:
             # Must automatically select cross-model (kimi-k2.5) rather than self-validating with gpt-5.6-sol
             assert sub_llm.model == "kimi-k2.5"
 
+    def test_swarm_sub_validator_model_automatic_when_caller_passes_matching_generic_client(self, mock_tools, mock_session):
+        # Caller passes a generic LLMClient whose model matches hunter_model (e.g. scripts/run_feature_hunt.py)
+        default_llm = MagicMock()
+        default_llm.model = "gpt-5.6-sol"
+        default_llm.provider = "openhack"
+        default_llm.prompt_cache_key = None
+
+        with patch.object(settings, "validator_model_id", None), \
+             patch.object(settings, "hunter_model_id", None):
+            swarm = ValidatorSwarmAgent(default_llm, mock_tools, mock_session, hunter_model="gpt-5.6-sol")
+            sub_llm = swarm._create_llm_for_sub_validator()
+            # Must automatically select cross-model (kimi-k2.5) rather than self-validating with gpt-5.6-sol
+            assert sub_llm.model == "kimi-k2.5"
+
     @pytest.mark.asyncio
     async def test_strict_majority_2_of_3_confirms_finding(self, mock_llm, mock_tools, mock_session):
         # 3 votes: 2 confirmed, 1 false positive -> should be confirmed
@@ -232,7 +246,7 @@ class TestValidatorSwarmConsensus:
             assert res["false_positives"][0]["status"] == "false_positive"
 
     @pytest.mark.asyncio
-    async def test_all_failed_votes_recorded_as_needs_more_info_not_false_positive(self, mock_llm, mock_tools, mock_session):
+    async def test_all_failed_votes_recorded_as_unreviewed_not_false_positive(self, mock_llm, mock_tools, mock_session):
         # If all sub-validators fail due to an unhandled API/runtime crash, it's not a false positive
         with patch.object(settings, "validator_votes", 3):
             swarm = ValidatorSwarmAgent(mock_llm, mock_tools, mock_session)
@@ -245,10 +259,11 @@ class TestValidatorSwarmConsensus:
                 res = await swarm.run("validate", context=context)
 
             assert len(res["validated_findings"]) == 0
-            assert len(res["false_positives"]) == 1
-            entry = res["false_positives"][0]
-            assert entry["status"] == "needs_more_info"
-            assert entry["confidence"] == "low"
+            assert len(res["false_positives"]) == 0
+            assert len(res["unreviewed"]) == 1
+            entry = res["unreviewed"][0]
+            assert entry["status"] == "unreviewed"
+            assert entry["confidence"] == "none"
             assert "failed to complete" in entry["evidence"]
 
 
