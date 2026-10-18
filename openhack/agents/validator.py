@@ -91,7 +91,9 @@ class ValidatorAgent(BaseAgent):
         return super().get_tools() + [VALIDATE_FINDING_TOOL, FINISH_VALIDATION_TOOL]
 
     def _handle_validate_finding(self, args: dict) -> dict:
-        status = args.get("status", "").lower()
+        status = (args.get("status") or "").lower().strip()
+        if not status:
+            return {"error": "Missing required field: 'status' must be provided."}
         if self.original_finding_index is not None:
             original_index = self.original_finding_index
         else:
@@ -189,7 +191,16 @@ class ValidatorAgent(BaseAgent):
                     },
                 )
 
-                if tool_call.name == "validate_finding":
+                if tool_call.parse_error:
+                    result = {
+                        "error": "tool_call_truncated",
+                        "message": (
+                            f"Arguments for '{tool_call.name}' were truncated due to token limits "
+                            f"(parse error: {tool_call.parse_error}). "
+                            "Please retry and call the tool with more concise arguments."
+                        ),
+                    }
+                elif tool_call.name == "validate_finding":
                     result = self._handle_validate_finding(tool_call.arguments)
                 elif tool_call.name == "finish_validation":
                     result = self._handle_finish_validation(tool_call.arguments)

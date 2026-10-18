@@ -200,10 +200,19 @@ class HunterAgent(BaseAgent):
         return line_number
 
     def _handle_report_finding(self, args: dict) -> dict:
-        file_path = args.get("file_path", "")
+        file_path = (args.get("file_path") or "").strip()
+        description = (args.get("description") or "").strip()
+
+        # Reject findings missing core required fields
+        if not file_path or not description:
+            logger.warning(f"Finding rejected: missing file_path or description (args={args})")
+            return {
+                "status": "rejected",
+                "reason": "Missing required fields: 'file_path' and 'description' must not be empty.",
+            }
 
         # Pre-filter: reject findings in excluded paths
-        if file_path and self._is_excluded_path(file_path):
+        if self._is_excluded_path(file_path):
             logger.info(f"Finding rejected (excluded path): {args.get('category', '?')} in {file_path}")
             return {"status": "rejected", "reason": f"File is in an excluded path (test/CLI/docs/examples): {file_path}"}
 
@@ -402,7 +411,17 @@ class HunterAgent(BaseAgent):
                     },
                 )
 
-                if tool_call.name == "report_finding":
+                if tool_call.parse_error:
+                    result = {
+                        "error": "tool_call_truncated",
+                        "message": (
+                            f"Arguments for '{tool_call.name}' were truncated due to token limits "
+                            f"(parse error: {tool_call.parse_error}). "
+                            "Please retry and call the tool with more concise arguments, "
+                            "or report findings one at a time."
+                        ),
+                    }
+                elif tool_call.name == "report_finding":
                     result = self._handle_report_finding(tool_call.arguments)
                     iterations_since_finding = 0
                     consecutive_reads = 0
