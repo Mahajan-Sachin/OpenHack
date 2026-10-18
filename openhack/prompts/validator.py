@@ -165,7 +165,7 @@ You MUST evaluate these five criteria. If ANY criterion disqualifies the finding
 
 **D. Parser & Sink Constraints -- Does the engine actually execute or expand this?**
 - **XXE (XML External Entity):** Confirm ONLY if the parser explicitly resolves EXTERNAL entities. Popular JavaScript/Node parsers (`xml2js`, `fast-xml-parser`, `sax`, `xml-js`) and safe Python parsers (`defusedxml`) do NOT resolve external entities by default. Unless external entity expansion is explicitly enabled in code configuration (`resolveEntities: true`, `load_dtd=True`, `noent=True`), mark as FALSE POSITIVE.
-- **XSS (Cross-Site Scripting):** Confirm ONLY if user-controlled input reaches a RAW-HTML sink (e.g., `dangerouslySetInnerHTML`, `v-html`, `innerHTML`, `document.write`, or unescaped template tags `{{{ }}}`). Standard JSX/TSX text expressions (e.g., `<div>{userInput}</div>`) are automatically HTML-escaped (auto-escaped) by React/Next.js/Vue and CANNOT execute script tags. Mark as FALSE POSITIVE.
+- **XSS (Cross-Site Scripting):** Confirm ONLY if user-controlled input reaches an executable sink: a RAW-HTML sink (e.g., `dangerouslySetInnerHTML`, `v-html`, `innerHTML`, `document.write`, or unescaped template tags `{{{{ }}}}`), an executable URL attribute (e.g., `href` or `src` accepting `javascript:` pseudo-protocols), or a dynamic script context. Standard JSX/TSX text expressions (e.g., `<div>{{userInput}}</div>`) are automatically HTML-escaped (auto-escaped) by React/Next.js/Vue and CANNOT execute script tags; mark those as FALSE POSITIVE.
 - **Framework Default Configs:** Framework default development configurations and diagnostic endpoints (e.g., Nuxt DevTools, Next.js telemetry, Vite HMR, Swagger UI in dev mode) are NOT production vulnerabilities unless active and reachable in production builds with real sensitive impact. Mark as FALSE POSITIVE.
 - **Blank / Vague Rationale:** If a candidate finding has a blank description, missing code snippet, or a vague tautological claim ("input is not validated" without demonstrating an exploitable sink and payload), mark as FALSE POSITIVE.
 
@@ -323,7 +323,7 @@ Be RUTHLESS about false positives. False positives waste developer time and erod
 - CORS `*` + credentials: true → FALSE POSITIVE (browsers reject this per Fetch spec)
 - CSRF where cookie is SameSite=Lax/Strict (or modern browser default) or requires custom headers/tokens → FALSE POSITIVE
 - XXE where parser does not explicitly resolve external entities (e.g. xml2js, sax, fast-xml-parser, defusedxml) → FALSE POSITIVE
-- XSS where input only reaches standard JSX/TSX text without raw-HTML sink (dangerouslySetInnerHTML) → FALSE POSITIVE
+- XSS where input only reaches standard JSX/TSX text without raw-HTML or executable sink → FALSE POSITIVE
 - Framework default dev configuration (Nuxt devtools, Next.js telemetry, Vite HMR) → FALSE POSITIVE
 - Blank or generic rationale without verified attacker-controlled sink/payload → FALSE POSITIVE
 - CSRF on forgot-password/signup/booking endpoints → FALSE POSITIVE (by-design public, no meaningful damage)

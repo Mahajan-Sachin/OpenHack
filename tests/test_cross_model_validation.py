@@ -12,6 +12,7 @@ from openhack.config import (
     resolve_validator_model,
     settings,
 )
+from openhack.agents.validator import ValidatorAgent
 from openhack.agents.validator_swarm import ValidatorSwarmAgent
 from openhack.prompts.validator import VALIDATOR_PROMPT
 
@@ -85,11 +86,14 @@ class TestValidatorSwarmConsensus:
     @pytest.mark.asyncio
     async def test_self_validation_warning_logged_when_models_equal(self, mock_llm, mock_tools, mock_session):
         with patch.object(settings, "validator_model_id", "gpt-5.6-sol"), \
-             patch.object(settings, "hunter_model_id", "gpt-5.6-sol"):
-            swarm = ValidatorSwarmAgent(mock_llm, mock_tools, mock_session)
+             patch.object(settings, "hunter_model_id", "gpt-5.6-sol"), \
+             patch("openhack.agents.validator_swarm.ValidatorAgent.run", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = {"validated_findings": [], "false_positives": [], "type": "validation_complete"}
+
+            swarm = ValidatorSwarmAgent(mock_llm, mock_tools, mock_session, hunter_model="gpt-5.6-sol")
             await swarm.run("validate", context={"hunter": {"findings": []}})
 
-            # Finding list was empty, so returns early without swarm start
+            # Non-empty finding triggers swarm start and self-validation warning
             result = await swarm.run("validate", context={
                 "hunter": {"findings": [{"file_path": "auth.py", "category": "xss", "description": "test"}]}
             })
@@ -102,6 +106,19 @@ class TestValidatorSwarmConsensus:
             ]
             assert len(warning_traces) >= 1
             assert warning_traces[0]["warning"] == "self_validation_detected"
+
+    def test_swarm_sub_validator_model_independent(self, mock_tools, mock_session):
+        # Coordinator passes hunter_model gpt-5.6-sol and validator client with kimi-k2.5
+        val_llm = MagicMock()
+        val_llm.model = "kimi-k2.5"
+        val_llm.provider = "openhack"
+        val_llm.prompt_cache_key = None
+
+        with patch.object(settings, "validator_model_id", None):
+            swarm = ValidatorSwarmAgent(val_llm, mock_tools, mock_session, hunter_model="gpt-5.6-sol")
+            sub_llm = swarm._create_llm_for_sub_validator()
+            # Validator must use kimi-k2.5 and NOT invert back to gpt-5.6-sol
+            assert sub_llm.model == "kimi-k2.5"
 
     @pytest.mark.asyncio
     async def test_strict_majority_2_of_3_confirms_finding(self, mock_llm, mock_tools, mock_session):
@@ -200,6 +217,26 @@ class TestValidatorSwarmConsensus:
             assert len(res["false_positives"]) == 1
             assert res["false_positives"][0]["status"] == "false_positive"
 
+    @pytest.mark.asyncio
+    async def test_all_failed_votes_recorded_as_needs_more_info_not_false_positive(self, mock_llm, mock_tools, mock_session):
+        # If all sub-validators fail due to an unhandled API/runtime crash, it's not a false positive
+        with patch.object(settings, "validator_votes", 3):
+            swarm = ValidatorSwarmAgent(mock_llm, mock_tools, mock_session)
+            context = {"hunter": {"findings": [{"file_path": "app.py", "category": "rce", "description": "eval"}]}}
+
+            async def mock_failed_run(task, ctx):
+                return {"validated_findings": [], "false_positives": [], "type": "validation_failed"}
+
+            with patch("openhack.agents.validator_swarm.ValidatorAgent.run", side_effect=mock_failed_run):
+                res = await swarm.run("validate", context=context)
+
+            assert len(res["validated_findings"]) == 0
+            assert len(res["false_positives"]) == 1
+            entry = res["false_positives"][0]
+            assert entry["status"] == "needs_more_info"
+            assert entry["confidence"] == "low"
+            assert "failed to complete" in entry["evidence"]
+
 
 class TestHardenedValidatorPromptChecks:
     def test_prompt_includes_csrf_samesite_check(self):
@@ -212,10 +249,11 @@ class TestHardenedValidatorPromptChecks:
         assert "EXTERNAL entities" in VALIDATOR_PROMPT
         assert "xml2js" in VALIDATOR_PROMPT
 
-    def test_prompt_includes_xss_raw_html_sink_check(self):
+    def test_prompt_includes_xss_sink_checks(self):
         assert "dangerouslySetInnerHTML" in VALIDATOR_PROMPT
         assert "RAW-HTML sink" in VALIDATOR_PROMPT
         assert "auto-escaped" in VALIDATOR_PROMPT
+        assert "javascript:" in VALIDATOR_PROMPT
 
     def test_prompt_includes_framework_default_and_blank_rationale(self):
         assert "Nuxt DevTools" in VALIDATOR_PROMPT or "Nuxt devtools" in VALIDATOR_PROMPT.lower()
@@ -223,3 +261,27 @@ class TestHardenedValidatorPromptChecks:
 
     def test_prompt_defines_false_positive_strictly(self):
         assert "MITIGATED, NOT PRESENT, NOT REACHABLE, or UNEXPLOITABLE" in VALIDATOR_PROMPT
+
+    def test_validator_agent_system_prompt_builds_without_format_error(self):
+        # Verify that get_system_prompt() formats correctly without KeyError on literal braces
+        mock_llm = MagicMock()
+        mock_tools = MagicMock()
+        mock_session = MagicMock()
+        agent = ValidatorAgent(mock_llm, mock_tools, mock_session, original_finding_index=1)
+        context = {
+            "hunter": {
+                "findings": [{
+                    "file_path": "components/profile.tsx",
+                    "category": "xss",
+                    "severity": "high",
+                    "line_number": 42,
+                    "description": "User input in template",
+                    "code_snippet": "<div>{userInput}</div>",
+                }]
+            },
+            "project_context": {"framework": "nextjs"},
+        }
+        prompt = agent.get_system_prompt(context)
+        assert "Candidate Finding 1 (UNVERIFIED HYPOTHESIS)" in prompt
+        assert "<div>{userInput}</div>" in prompt
+        assert "dangerouslySetInnerHTML" in prompt

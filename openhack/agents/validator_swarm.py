@@ -19,24 +19,35 @@ class ValidatorSwarmAgent:
     name = "validator_swarm"
     description = "Validator swarm coordinator"
 
-    def __init__(self, llm: LLMClient, tools: ToolRegistry, session: Session):
+    def __init__(
+        self,
+        llm: LLMClient,
+        tools: ToolRegistry,
+        session: Session,
+        hunter_model: Optional[str] = None,
+    ):
         self.llm = llm
         self.tools = tools
         self.session = session
+        self.hunter_model = hunter_model
         self.total_cost: float = 0.0
         self.total_tokens: int = 0
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
 
-    def _create_llm_for_sub_validator(self) -> LLMClient:
-        hunter_model = getattr(settings, "hunter_model_id", None) or self.llm.model
-        model = resolve_validator_model(
-            hunter_model=hunter_model,
-            requested_validator_model=settings.validator_model_id,
-            provider=self.llm.provider,
+    def _get_models(self) -> tuple[str, str]:
+        hunter_model = (
+            self.hunter_model
+            or getattr(settings, "hunter_model_id", None)
+            or self.llm.model
         )
+        validator_model = settings.validator_model_id or self.llm.model
+        return hunter_model, validator_model
+
+    def _create_llm_for_sub_validator(self) -> LLMClient:
+        _, validator_model = self._get_models()
         return LLMClient(
-            model=model,
+            model=validator_model,
             temperature=0.0,
             max_tokens=8192,
             provider=self.llm.provider,
@@ -62,12 +73,7 @@ class ValidatorSwarmAgent:
                 "type": "validation_complete",
             }
 
-        hunter_model = getattr(settings, "hunter_model_id", None) or self.llm.model
-        validator_model = resolve_validator_model(
-            hunter_model=hunter_model,
-            requested_validator_model=settings.validator_model_id,
-            provider=self.llm.provider,
-        )
+        hunter_model, validator_model = self._get_models()
 
         # Startup check: warn if validator uses the same model as hunter (self-validation)
         self_val_warning = check_self_validation(hunter_model, validator_model)
@@ -171,23 +177,33 @@ class ValidatorSwarmAgent:
                     if r.get("false_positives"):
                         fp_entry = r["false_positives"][0]
                         break
+                all_failed = all(r.get("type") == "validation_failed" for r in run_results)
                 if not fp_entry:
-                    fp_entry = {
-                        "original_index": finding_idx,
-                        "status": "false_positive",
-                        "confidence": "high" if votes > 1 else "medium",
-                        "evidence": f"Failed strict majority validation ({confirmed_count}/{votes} confirmed votes, required >={threshold})",
-                    }
+                    if all_failed:
+                        fp_entry = {
+                            "original_index": finding_idx,
+                            "status": "needs_more_info",
+                            "confidence": "low",
+                            "evidence": f"Validation review failed to complete across all {votes} attempts (execution error).",
+                        }
+                    else:
+                        fp_entry = {
+                            "original_index": finding_idx,
+                            "status": "false_positive",
+                            "confidence": "medium",
+                            "evidence": f"Failed strict majority validation ({confirmed_count}/{votes} confirmed votes, required >={threshold})",
+                        }
                 all_false_positives.append(fp_entry)
                 self.session.add_trace(
                     agent=self.name,
                     event_type="validation_consensus",
                     content={
                         "finding_index": finding_idx,
-                        "status": "false_positive",
+                        "status": fp_entry.get("status", "false_positive"),
                         "confirmed_votes": confirmed_count,
                         "total_votes": votes,
                         "threshold": threshold,
+                        "review_failed": all_failed,
                     },
                 )
 

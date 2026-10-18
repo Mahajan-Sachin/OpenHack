@@ -798,7 +798,10 @@ class CoordinatorAgent(BaseAgent):
             if potential_findings:
                 self.session.add_trace(agent="coordinator", event_type="step_start", content="Step 3: Validation (swarm)")
                 validator_llm = self._create_llm_for_agent("validator")
-                validator_swarm = ValidatorSwarmAgent(validator_llm, self.tools, self.session)
+                hunter_model = getattr(settings, "hunter_model_id", None) or self.llm.model
+                validator_swarm = ValidatorSwarmAgent(
+                    validator_llm, self.tools, self.session, hunter_model=hunter_model
+                )
                 validator_result = await validator_swarm.run(
                     "Validate each potential vulnerability.", context=self.context)
                 self.context["validator"] = validator_result
