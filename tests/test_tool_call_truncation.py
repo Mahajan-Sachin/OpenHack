@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 from openhack.agents.hunter import HunterAgent
 from openhack.agents.validator import ValidatorAgent
 from openhack.agents.base import BaseAgent
+from openhack.agents.sandbox_verifier import SandboxVerifierAgent
+from openhack.agents.browser_verifier import BrowserVerifierAgent
 from openhack.agents.llm import ToolCall, LLMResponse, Message
 from openhack.agents.session import Session
 from openhack.tools.registry import ToolRegistry
@@ -37,7 +39,7 @@ def test_hunter_handle_report_finding_rejects_empty_args(session, tools):
     hunter = HunterAgent(llm, tools, session, vuln_categories=["xss"])
     result = hunter._handle_report_finding({})
     assert result["status"] == "rejected"
-    assert "Missing required fields" in result["reason"]
+    assert "Missing" in result["reason"]
     assert len(hunter.findings) == 0
 
 
@@ -51,6 +53,27 @@ def test_hunter_handle_report_finding_rejects_missing_file_or_desc(session, tool
 
     # Missing file_path
     res2 = hunter._handle_report_finding({"description": "Some bug"})
+    assert res2["status"] == "rejected"
+    assert len(hunter.findings) == 0
+
+
+def test_hunter_handle_report_finding_rejects_malformed_non_string_fields(session, tools):
+    llm = MagicMock()
+    hunter = HunterAgent(llm, tools, session, vuln_categories=["xss"])
+    # Dict description instead of string
+    res = hunter._handle_report_finding({
+        "file_path": "app.py",
+        "description": {"summary": "SQL injection"},
+    })
+    assert res["status"] == "rejected"
+    assert "Missing or invalid required fields" in res["reason"]
+    assert len(hunter.findings) == 0
+
+    # List file_path instead of string
+    res2 = hunter._handle_report_finding({
+        "file_path": ["app.py"],
+        "description": "SQL injection",
+    })
     assert res2["status"] == "rejected"
     assert len(hunter.findings) == 0
 
@@ -130,7 +153,13 @@ def test_validator_handle_validate_finding_rejects_empty_status(session, tools):
     validator = ValidatorAgent(llm, tools, session)
     result = validator._handle_validate_finding({})
     assert "error" in result
-    assert "Missing required field: 'status'" in result["error"]
+    assert "Missing or invalid required field" in result["error"]
+    assert len(validator.validated_findings) == 0
+    assert len(validator.false_positives) == 0
+
+    # Non-string status
+    result2 = validator._handle_validate_finding({"status": {"confirmed": True}})
+    assert "error" in result2
     assert len(validator.validated_findings) == 0
     assert len(validator.false_positives) == 0
 
@@ -210,3 +239,106 @@ async def test_base_agent_handles_truncated_tool_call(session, tools):
 
     tool_result_messages = [m for m in agent.messages if m.role == "tool"]
     assert any("tool_call_truncated" in m.content for m in tool_result_messages)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_verifier_handles_truncated_tool_call(session, tools):
+    mock_llm = MagicMock()
+    verifier = SandboxVerifierAgent(mock_llm, tools, session, sandbox_url="http://localhost:8080")
+
+    # Turn 1: Truncated sandbox action call
+    truncated_tc = ToolCall(
+        id="call_sb_1",
+        name="sandbox_http_request",
+        arguments={},
+        raw_arguments='{"method": "POST", "path": "/login", "body": "pass',
+        parse_error="Unterminated string",
+    )
+    turn1_resp = LLMResponse(
+        content="",
+        tool_calls=[truncated_tc],
+        finish_reason="length",
+    )
+
+    # Turn 2: Retried completion call
+    finish_tc = ToolCall(
+        id="call_sb_2",
+        name="report_exploit_result",
+        arguments={
+            "status": "exploitable",
+            "confidence": "high",
+            "evidence": "Logged in as admin",
+            "attempts_made": 1,
+        },
+        raw_arguments='{"status": "exploitable", "confidence": "high", "evidence": "Logged in as admin", "attempts_made": 1}',
+        parse_error=None,
+    )
+    turn2_resp = LLMResponse(
+        content="Exploit confirmed",
+        tool_calls=[finish_tc],
+        finish_reason="stop",
+    )
+
+    mock_llm.chat = AsyncMock(side_effect=[turn1_resp, turn2_resp])
+
+    await verifier.run("Verify finding")
+
+    # Check error message reached model
+    tool_result_messages = [m for m in verifier.messages if m.role == "tool"]
+    assert any("tool_call_truncated" in m.content for m in tool_result_messages)
+    assert verifier.exploit_result is not None
+    assert verifier.exploit_result["status"] == "exploitable"
+
+
+@pytest.mark.asyncio
+async def test_browser_verifier_handles_truncated_tool_call(session, tools):
+    mock_llm = MagicMock()
+    mock_runner = MagicMock()
+    mock_ctx = AsyncMock()
+    mock_runner.create_context = AsyncMock(return_value=mock_ctx)
+    verifier = BrowserVerifierAgent(
+        mock_llm, tools, session, sandbox_url="http://localhost:8080", browser_runner=mock_runner
+    )
+
+    # Turn 1: Truncated browser navigation call
+    truncated_tc = ToolCall(
+        id="call_br_1",
+        name="browser_navigate",
+        arguments={},
+        raw_arguments='{"url": "http://localhost:8080/search?q=<script>alert',
+        parse_error="Unterminated string",
+    )
+    turn1_resp = LLMResponse(
+        content="",
+        tool_calls=[truncated_tc],
+        finish_reason="length",
+    )
+
+    # Turn 2: Retried completion call
+    finish_tc = ToolCall(
+        id="call_br_2",
+        name="report_browser_result",
+        arguments={
+            "status": "exploitable",
+            "confidence": "high",
+            "evidence": "XSS alert triggered",
+            "attempts_made": 1,
+        },
+        raw_arguments='{"status": "exploitable", "confidence": "high", "evidence": "XSS alert triggered", "attempts_made": 1}',
+        parse_error=None,
+    )
+    turn2_resp = LLMResponse(
+        content="Browser exploit confirmed",
+        tool_calls=[finish_tc],
+        finish_reason="stop",
+    )
+
+    mock_llm.chat = AsyncMock(side_effect=[turn1_resp, turn2_resp])
+
+    await verifier.run("Verify browser finding")
+
+    # Check error message reached model
+    tool_result_messages = [m for m in verifier.messages if m.role == "tool"]
+    assert any("tool_call_truncated" in m.content for m in tool_result_messages)
+    assert verifier.browser_result is not None
+    assert verifier.browser_result["status"] == "exploitable"
